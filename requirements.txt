@@ -1,0 +1,6 @@
+pyttsx3
+sympy
+speechrecognition
+vosk
+sounddevice
+pyaudio (для некоторых платформ можно использовать вместо sounddevice)
