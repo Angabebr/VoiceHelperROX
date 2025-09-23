@@ -93,7 +93,7 @@ if ASR_BACKEND is None:
         ASR_BACKEND = None
 
 
-def listen_vosk(timeout=8):
+def listen_vosk(timeout=15):
     """Прослушивание микрофона с Vosk. Возвращает распознанную строку или None."""
     try:
         q = queue.Queue()
@@ -101,50 +101,119 @@ def listen_vosk(timeout=8):
         rec = KaldiRecognizer(vosk_model, samplerate)
 
         print("Говорите... (Vosk)")
+        print("(Говорите четко и ждите завершения фразы)")
         response_text = None
+        last_activity = time.time()
+        
         with sd.RawInputStream(samplerate=samplerate, blocksize = 8000, dtype='int16', channels=1) as stream:
             start = time.time()
             while True:
                 data = stream.read(4000)
+                
+                # Проверяем активность звука
+                audio_data = data[0]
+                audio_level = max(audio_data) if len(audio_data) > 0 else 0
+                
+                if audio_level > 100:  # Есть звук
+                    last_activity = time.time()
+                
                 if rec.AcceptWaveform(data[0]):
                     res = json.loads(rec.Result())
-                    if 'text' in res:
+                    if 'text' in res and res['text'].strip():
                         response_text = res['text']
+                        print(f"Распознано: {response_text}")
                         break
                 else:
-                    # промежуточный результат можно игнорировать
-                    pass
+                    # Проверяем промежуточный результат
+                    partial = json.loads(rec.PartialResult())
+                    if 'partial' in partial and partial['partial'].strip():
+                        # Есть частичный результат, продолжаем слушать
+                        pass
+                
+                # Если прошло больше 2 секунд без звука после начала речи
+                if time.time() - last_activity > 2.0 and time.time() - start > 1.0:
+                    # Попробуем получить частичный результат
+                    res = json.loads(rec.FinalResult())
+                    if 'text' in res and res['text'].strip():
+                        response_text = res['text']
+                        print(f"Распознано (частично): {response_text}")
+                        break
+                
                 if time.time() - start > timeout:
-                    # попробуем получить частичный
+                    # Попробуем получить частичный
                     res = json.loads(rec.FinalResult())
                     response_text = res.get('text', '')
-                    break
+                    if response_text.strip():
+                        print(f"Распознано (таймаут): {response_text}")
+                        break
+                    else:
+                        print("Таймаут - ничего не распознано")
+                        return None
+                        
         return response_text
     except Exception as e:
         print('Vosk listen error:', e)
         return None
 
 
-def listen_speech_recognition(timeout=8):
+def listen_speech_recognition(timeout=15):
     """Использует Google Web Speech API через speech_recognition (нужен интернет)."""
     import speech_recognition as sr
     r = sr.Recognizer()
+    
+    # Настройки для лучшего распознавания речи
+    r.energy_threshold = 300  # Минимальная громкость звука
+    r.dynamic_energy_threshold = True
+    r.pause_threshold = 0.8  # Пауза перед завершением фразы (секунды)
+    r.phrase_threshold = 0.3  # Минимальная длина фразы
+    r.non_speaking_duration = 0.5  # Пауза после речи
+    
     with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source, duration=0.5)
+        print("Настраиваю микрофон...")
+        r.adjust_for_ambient_noise(source, duration=1.0)  # Увеличиваем время настройки
         print("Говорите... (Google ASR)")
-        audio = r.listen(source, timeout=timeout, phrase_time_limit=15)
+        print("(Говорите четко и ждите завершения фразы)")
+        
+        # Увеличиваем время ожидания и лимит фразы
+        audio = r.listen(source, timeout=timeout, phrase_time_limit=30)
+    
     try:
         txt = r.recognize_google(audio, language='ru-RU')
+        print(f"Распознано: {txt}")
         return txt
     except sr.UnknownValueError:
+        print("Не удалось распознать речь")
+        return None
+    except sr.RequestError as e:
+        print(f'Ошибка сервиса распознавания: {e}')
         return None
     except Exception as e:
         print('ASR error:', e)
         return None
 
 
+def setup_microphone():
+    """Настройка микрофона для лучшего распознавания речи."""
+    try:
+        import speech_recognition as sr
+        r = sr.Recognizer()
+        
+        print("🔧 Настройка микрофона...")
+        with sr.Microphone() as source:
+            print("📢 Пожалуйста, помолчите 3 секунды для калибровки...")
+            r.adjust_for_ambient_noise(source, duration=3.0)
+            
+        print("✅ Микрофон настроен!")
+        return True
+    except Exception as e:
+        print(f"⚠️ Не удалось настроить микрофон: {e}")
+        return False
+
+
 def listen():
     """Единый интерфейс прослушивания. Возвращает распознанную фразу на русском."""
+    print("\n🎤 Готов слушать...")
+    
     if ASR_BACKEND == 'vosk' and vosk_model is not None:
         try:
             txt = listen_vosk()
@@ -161,7 +230,8 @@ def listen():
     
     # fallback: чтение из ввода пользователя
     try:
-        return input('Введите текст (fallback): ')
+        print("⌨️ Используется текстовый ввод")
+        return input('Введите команду: ')
     except (EOFError, KeyboardInterrupt):
         return None
     except Exception as e:
@@ -809,22 +879,46 @@ def handle_command(intent, data):
 # --- Основной цикл ---
 
 def main_loop():
+    # Настройка микрофона при запуске
+    setup_microphone()
+    
     # Показываем статус LLM при запуске
     if LLM_BACKEND:
         speak(f'Готов. Нейросеть активна: {LLM_BACKEND}. Скажите команду.')
+        print("💡 Совет: Говорите четко, делайте паузы между словами")
+        print("💡 Помощник ждет завершения вашей фразы перед ответом")
     else:
         speak('Готов. Скажите команду.')
+        print("💡 Совет: Говорите четко, делайте паузы между словами")
+    
+    print("\n" + "="*50)
+    print("🎤 ГОЛОСОВОЙ ПОМОЩНИК ЗАПУЩЕН")
+    print("💬 Доступные команды:")
+    print("   • 'открой Chrome' - запуск приложений")
+    print("   • 'найди и запусти Steam' - умный поиск")
+    print("   • 'что такое Python?' - вопросы к нейросети")
+    print("   • 'поставь будильник на 07:30' - будильники")
+    print("   • 'помощь' - список команд")
+    print("   • 'выход' - завершение работы")
+    print("="*50 + "\n")
+    
     while True:
         try:
             txt = listen()
             if not txt:
                 speak('Я ничего не расслышал. Повторите, пожалуйста.')
                 continue
-            print('Вы сказали:', txt)
+            
+            print(f'🗣️ Вы сказали: "{txt}"')
             intent, data = parse_command(txt)
             handle_command(intent, data)
+            
+            # Пауза перед следующим прослушиванием
+            print("\n" + "-"*30)
+            
         except KeyboardInterrupt:
             speak('Выход')
+            print("\n👋 До свидания!")
             break
         except Exception as e:
             print('Ошибка основного цикла:', e)
